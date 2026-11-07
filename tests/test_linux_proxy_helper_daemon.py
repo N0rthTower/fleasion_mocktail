@@ -485,7 +485,9 @@ def test_serve_requires_system_ca_before_applying_hosts(tmp_path, monkeypatch):
     ca.write_text('ca', encoding='utf-8')
 
     monkeypatch.setattr(daemon, '_repair_config_ownership', lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(daemon, '_repair_sober_cert_ownership', lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        daemon, '_repair_linux_client_cert_ownership', lambda *_args, **_kwargs: None
+    )
     monkeypatch.setattr(daemon, '_system_ca_is_current', lambda _path: False)
     monkeypatch.setattr(daemon, '_apply_hosts', lambda hosts: hosts_calls.append(hosts))
     monkeypatch.setattr(
@@ -519,9 +521,9 @@ def test_serve_requires_system_ca_before_applying_hosts(tmp_path, monkeypatch):
     assert hosts_calls == []
 
 
-def test_repair_sober_cert_ownership_repairs_only_user_home_paths(tmp_path, monkeypatch):
+def test_repair_linux_client_cert_ownership_repairs_user_home_paths(tmp_path, monkeypatch):
     home = tmp_path / 'home'
-    cert = (
+    sober_cert = (
         home
         / '.var'
         / 'app'
@@ -532,8 +534,25 @@ def test_repair_sober_cert_ownership_repairs_only_user_home_paths(tmp_path, monk
         / 'ssl'
         / 'cacert.pem'
     )
-    cert.parent.mkdir(parents=True)
-    cert.write_text('cert', encoding='utf-8')
+    mocktail_cert = (
+        home
+        / '.var'
+        / 'app'
+        / 'space.bigrat.mocktail'
+        / 'data'
+        / 'mocktail'
+        / 'exe'
+        / 'ssl'
+        / 'cacert.pem'
+    )
+    sober_cert.parent.mkdir(parents=True)
+    sober_cert.write_text('sober-cert', encoding='utf-8')
+    mocktail_cert.parent.mkdir(parents=True)
+    mocktail_cert.write_text('mocktail-cert', encoding='utf-8')
+    # Outside the user home: must not be touched.
+    outside = tmp_path / 'outside' / 'cacert.pem'
+    outside.parent.mkdir(parents=True)
+    outside.write_text('outside-cert', encoding='utf-8')
     chowned = []
 
     class Pw:
@@ -556,8 +575,10 @@ def test_repair_sober_cert_ownership_repairs_only_user_home_paths(tmp_path, monk
     )
     monkeypatch.setattr(daemon.Path, 'lstat', fake_lstat)
 
-    daemon._repair_sober_cert_ownership(1000, 1000)
+    daemon._repair_linux_client_cert_ownership(1000, 1000)
 
-    assert (cert.parent.parent, 1000, 1000, False) in chowned
-    assert (cert.parent, 1000, 1000, False) in chowned
-    assert (cert, 1000, 1000, False) in chowned
+    for cert in (sober_cert, mocktail_cert):
+        assert (cert.parent.parent, 1000, 1000, False) in chowned
+        assert (cert.parent, 1000, 1000, False) in chowned
+        assert (cert, 1000, 1000, False) in chowned
+    assert not any(path == outside for path, *_rest in chowned)

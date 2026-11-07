@@ -50,6 +50,21 @@ _SOBER_CANONICAL_LOOKUP = {
     for source, destination in SOBER_TARGET_PATHS.items()
 }
 
+# Mocktail ships Android assets, so its PC-to-Android target mapping mirrors
+# Sober's.  Mocktail resource roots live under its Flatpak data dir and may
+# expose assets through an overlay or legacy exe directory plus the active
+# payload's assets/content and the base APK.
+MOCKTAIL_TARGET_PATHS: dict[str, str] = dict(SOBER_TARGET_PATHS)
+
+_MOCKTAIL_TARGET_LOOKUP = {
+    _normalise_key(source).casefold(): _normalise_key(destination)
+    for source, destination in MOCKTAIL_TARGET_PATHS.items()
+}
+_MOCKTAIL_CANONICAL_LOOKUP = {
+    destination.casefold(): _normalise_key(source)
+    for source, destination in MOCKTAIL_TARGET_PATHS.items()
+}
+
 
 def target_path_for_current_platform(target_path: str | Path) -> str:
     """Return the persisted logical target path.
@@ -80,15 +95,17 @@ def _linux_resource_client_key(resource_dir: Path) -> str | None:
     try:
         from ..utils.linux_clients import LINUX_CLIENTS
         from ..utils.paths import USER_HOME
-        from ..utils.platform_linux import is_sober_resource_dir
+        from ..utils.platform_linux import is_mocktail_resource_dir, is_sober_resource_dir
 
         for descriptor in LINUX_CLIENTS:
             if descriptor.paths(home=USER_HOME).owns_resource_path(root):
                 return descriptor.key
-        # Preserve the narrow legacy Sober adapter used by tests and existing
+        # Preserve the narrow legacy adapters used by tests and existing
         # installations whose Flatpak metadata is temporarily unavailable.
         if is_sober_resource_dir(root):
             return 'sober'
+        if is_mocktail_resource_dir(root):
+            return 'mocktail'
     except Exception:
         pass
     return None
@@ -98,6 +115,8 @@ def _target_path_for_client(client_key: str | None, target_path: str | Path) -> 
     normalised = _normalise_relative_target(target_path)
     if client_key == 'sober':
         return _SOBER_TARGET_LOOKUP.get(normalised.casefold(), normalised)
+    if client_key == 'mocktail':
+        return _MOCKTAIL_TARGET_LOOKUP.get(normalised.casefold(), normalised)
     return normalised
 
 
@@ -120,9 +139,17 @@ def content_prefixed_resource_root(resource_dir: Path) -> Path:
 
 
 def target_path_candidates_for_current_platform(target_path: str | Path) -> list[str]:
-    """Return legacy Sober target candidates, preferred path first."""
+    """Return legacy target candidates, preferred path first.
+
+    Checks both registered Linux clients' mappings so entries saved under
+    either backend can be resolved.
+    """
     normalised = _normalise_relative_target(target_path)
-    candidates = [_target_path_for_client('sober', normalised), normalised]
+    candidates = [
+        _target_path_for_client('sober', normalised),
+        _target_path_for_client('mocktail', normalised),
+        normalised,
+    ]
     unique: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -238,6 +265,96 @@ def _read_sober_original_asset_directory(target_dir: str | Path) -> dict[str, by
     return result
 
 
+def _mocktail_payload_roots() -> list[Path]:
+    """Return Mocktail asset roots: direct dirs, legacy exe dir, APKs, and active payload."""
+    try:
+        from ..utils.platform_linux import MOCKTAIL_DATA_DIR, MOCKTAIL_LEGACY_EXE_DIR
+    except Exception:
+        return []
+
+    roots: list[Path] = []
+    for root in (MOCKTAIL_DATA_DIR / 'assets', MOCKTAIL_LEGACY_EXE_DIR):
+        if root.is_dir():
+            roots.append(root)
+
+    packages_dir = MOCKTAIL_DATA_DIR / 'packages'
+    try:
+        apks = sorted(packages_dir.glob('*/com.roblox.client/base.apk'))
+    except OSError:
+        apks = []
+    roots.extend(apks)
+
+    # Active payload assets, discovered via the current.json manifest.
+    manifest = MOCKTAIL_DATA_DIR / 'current.json'
+    try:
+        import json
+
+        payload = json.loads(manifest.read_text(encoding='utf-8'))
+        payload_id = payload.get('payload_id') if isinstance(payload, dict) else None
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        payload_id = None
+    if payload_id:
+        payload_assets = MOCKTAIL_DATA_DIR / 'payloads' / str(payload_id) / 'assets' / 'content'
+        if payload_assets.is_dir():
+            roots.append(payload_assets)
+
+    return roots
+
+
+def _read_mocktail_original_asset(target_path: str | Path) -> bytes | None:
+    for rel in target_path_candidates_for_current_platform(target_path):
+        for root in _mocktail_payload_roots():
+            if root.suffix == '.apk':
+                archived = _read_zip_member(root, f'assets/{rel}')
+                if archived is not None:
+                    return archived
+            else:
+                direct = _read_file(root / rel)
+                if direct is not None:
+                    return direct
+    return None
+
+
+def _read_mocktail_original_asset_directory(target_dir: str | Path) -> dict[str, bytes]:
+    """Read immediate files from a directory in Mocktail's packaged assets."""
+    try:
+        rel = _normalise_relative_target(target_dir)
+    except ValueError:
+        return {}
+
+    result: dict[str, bytes] = {}
+    prefix = f'assets/{rel.rstrip("/")}/'
+
+    for root in _mocktail_payload_roots():
+        if root.suffix == '.apk':
+            try:
+                with zipfile.ZipFile(root) as archive:
+                    for member in archive.namelist():
+                        if not member.startswith(prefix):
+                            continue
+                        name = member[len(prefix) :]
+                        if not name or '/' in name or name in result:
+                            continue
+                        try:
+                            result[name] = archive.read(member)
+                        except KeyError:
+                            continue
+            except OSError, zipfile.BadZipFile:
+                continue
+        else:
+            directory = root / rel
+            try:
+                paths = sorted(path for path in directory.iterdir() if path.is_file())
+            except OSError:
+                paths = []
+            for path in paths:
+                data = _read_file(path)
+                if data is not None:
+                    result.setdefault(path.name, data)
+
+    return result
+
+
 def read_current_platform_original_asset(
     target_path: str | Path,
     resource_dir: Path | None = None,
@@ -257,6 +374,8 @@ def read_current_platform_original_asset(
             client_key = 'sober'
     if client_key == 'sober':
         return _read_sober_original_asset(target_path)
+    if client_key == 'mocktail':
+        return _read_mocktail_original_asset(target_path)
     return None
 
 
@@ -279,4 +398,6 @@ def read_current_platform_original_directory(
             client_key = 'sober'
     if client_key == 'sober':
         return _read_sober_original_asset_directory(target_dir)
+    if client_key == 'mocktail':
+        return _read_mocktail_original_asset_directory(target_dir)
     return {}

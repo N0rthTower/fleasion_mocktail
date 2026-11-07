@@ -264,8 +264,8 @@ DEFAULT_SETTINGS = {
     'clear_cache_on_launch': True,
     'proxy_features_enabled': True,
     'proxy_mode': 'env',
-    # Linux client selection is registry-backed. Sober is the only registered
-    # implementation today; ``auto`` leaves room for future backends.
+    # Linux client selection is registry-backed. Registered backends include
+    # Sober and Mocktail; ``auto`` picks the detected/default handler.
     'linux_client': 'auto',
     'env_proxy_migration_v1_complete': False,
     'lock_roblox_files_read_only': False,

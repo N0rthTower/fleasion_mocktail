@@ -42,20 +42,38 @@ from .paths import (
 from .plural import format_count, pluralize
 from .threading import run_in_thread
 from .time_tracker import TimeTracker, time_tracker
-from .windows import (
-    delete_cache,
-    get_roblox_process_identity,
-    get_roblox_player_exe_path,
-    get_roblox_studio_exe_path,
-    is_roblox_running,
-    is_studio_running,
-    launch_as_standard_user,
-    open_folder,
-    show_message_box,
-    terminate_roblox,
-    wait_for_roblox_exit,
-    wait_for_roblox_window,
-)
+import sys as _sys
+
+if _sys.platform.startswith('linux'):
+    from .platform_linux import (
+        delete_cache,
+        get_roblox_process_identity,
+        get_roblox_player_exe_path,
+        get_roblox_studio_exe_path,
+        is_roblox_running,
+        is_studio_running,
+        launch_as_standard_user,
+        open_folder,
+        show_message_box,
+        terminate_roblox,
+        wait_for_roblox_exit,
+        wait_for_roblox_window,
+    )
+else:
+    from .windows import (
+        delete_cache,
+        get_roblox_process_identity,
+        get_roblox_player_exe_path,
+        get_roblox_studio_exe_path,
+        is_roblox_running,
+        is_studio_running,
+        launch_as_standard_user,
+        open_folder,
+        show_message_box,
+        terminate_roblox,
+        wait_for_roblox_exit,
+        wait_for_roblox_window,
+    )
 
 
 def start_update_check(*args, **kwargs):

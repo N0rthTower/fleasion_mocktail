@@ -7,6 +7,8 @@ import pytest
 from fleasion import app as app_module
 from fleasion import __version__ as APP_VERSION
 from fleasion.utils import macos_proxy_helper
+from fleasion.utils.linux_clients import LinuxClientInstallation, SOBER_CLIENT
+from fleasion.utils import platform_linux
 from fleasion.app import (
     _RobloxUrlEventFilter,
     _handle_single_instance_command,
@@ -223,11 +225,22 @@ def test_completed_env_proxy_migration_preserves_hosts_choice():
     assert config.proxy_mode == 'hosts'
 
 
-def test_linux_env_proxy_migration_adopts_running_sober_without_relaunch(monkeypatch):
+def test_linux_env_proxy_migration_adopts_running_sober_without_relaunch(
+    monkeypatch, tmp_path
+):
     events = []
     config = SimpleNamespace(
         proxy_features_enabled=True,
         env_proxy_migration_v1_complete=False,
+    )
+    monkeypatch.setattr(
+        platform_linux,
+        'get_selected_linux_client_installation',
+        lambda: LinuxClientInstallation(
+            client=SOBER_CLIENT,
+            paths=SOBER_CLIENT.paths(home=tmp_path, environ={}),
+            executable=Path('/usr/bin/flatpak'),
+        ),
     )
     lifecycle = SimpleNamespace(
         handle_adopted_player_launch=lambda path: events.append(('adopt', Path(path)))
@@ -1321,7 +1334,9 @@ def test_windows_desktop_player_launch_uses_env_lifecycle(monkeypatch, tmp_path)
     assert qt_app is not None
 
 
-def test_linux_browser_sober_launch_is_always_adopted_without_relaunch(monkeypatch):
+def test_linux_browser_sober_launch_is_always_adopted_without_relaunch(
+    monkeypatch, tmp_path
+):
     qt_app = QCoreApplication.instance() or QCoreApplication([])
     config = SimpleNamespace(
         proxy_mode='env',
@@ -1354,6 +1369,15 @@ def test_linux_browser_sober_launch_is_always_adopted_without_relaunch(monkeypat
     monkeypatch.setattr(app_module, 'is_roblox_running', lambda: True)
     monkeypatch.setattr(app_module, 'is_studio_running', lambda: False)
     monkeypatch.setattr(app_module, 'run_in_thread', lambda function: function)
+    monkeypatch.setattr(
+        platform_linux,
+        'get_selected_linux_client_installation',
+        lambda: LinuxClientInstallation(
+            client=SOBER_CLIENT,
+            paths=SOBER_CLIENT.paths(home=tmp_path, environ={}),
+            executable=Path('/usr/bin/flatpak'),
+        ),
+    )
 
     monitor._check_roblox_status_locked()
 

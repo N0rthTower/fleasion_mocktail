@@ -1566,10 +1566,21 @@ def set_roblosecurity(cookie: str, path: Path | None = None) -> bool:
     if sys.platform.startswith('linux'):
         candidate = _selected_linux_local_auth_candidate()
         if candidate is None:
+            installation = _selected_linux_client_installation()
+            client_name = getattr(installation, 'display_name', None) if installation else None
+            if client_name:
+                hint = (
+                    f'{client_name} has no writable local cookie store for Fleasion to use. '
+                    'Fleasion did not change any account data.'
+                )
+            else:
+                hint = (
+                    'No Linux Roblox client is installed as a Flatpak, or Flatpak could not '
+                    'confirm the installation. Fleasion did not change any account data.'
+                )
             error = LinuxAuthWriteError(
                 'linux_client_not_installed',
-                'Sober is not installed as a Flatpak, or Flatpak could not confirm the installation. '
-                'Fleasion did not change any Sober account data.',
+                hint,
             )
             _log_auth_failure(
                 'linux-cookie-write-provider-missing',

@@ -5519,7 +5519,7 @@ class ProxyMaster:
 
             install_ca_into_linux_trust(
                 ca_cert_path,
-                install_system=False,
+                install_system=True,
             )
 
         # Clean up stale state from a previous crash

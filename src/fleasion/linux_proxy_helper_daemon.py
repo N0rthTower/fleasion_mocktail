@@ -941,23 +941,34 @@ def _repair_config_ownership(config_dir: Path, uid: int, gid: int) -> None:
         _log(f'Repaired ownership for {repaired} Fleasion config paths')
 
 
-def _repair_sober_cert_ownership(uid: int, gid: int) -> None:
-    """Return Sober cert bundle paths to the interactive user if needed."""
+def _linux_client_cert_candidates(user_home: Path) -> list[Path]:
+    """Return cert-bundle paths for every registered Linux client beneath *user_home*."""
+    candidates: list[Path] = []
+    try:
+        from fleasion.utils.linux_clients import LINUX_CLIENTS
+    except Exception:
+        return candidates
+    for descriptor in LINUX_CLIENTS:
+        data = user_home / '.var' / 'app' / descriptor.app_id / 'data' / descriptor.xdg_namespace
+        for resource_dir in (data / 'asset_overlay', data / 'exe'):
+            candidates.extend(
+                (resource_dir, resource_dir / 'ssl', resource_dir / 'ssl' / 'cacert.pem')
+            )
+    return candidates
+
+
+def _repair_linux_client_cert_ownership(uid: int, gid: int) -> None:
+    """Return Linux client cert bundle paths to the interactive user if needed."""
     if uid <= 0 or gid < 0:
         return
     try:
         user_home = Path(pwd.getpwuid(uid).pw_dir).resolve()
     except Exception as exc:
-        _log(f'Skipped Sober cert ownership repair: {exc}')
+        _log(f'Skipped Linux client cert ownership repair: {exc}')
         return
 
-    sober_data = user_home / '.var' / 'app' / 'org.vinegarhq.Sober' / 'data' / 'sober'
-    candidates = []
-    for resource_dir in (sober_data / 'asset_overlay', sober_data / 'exe'):
-        candidates.extend((resource_dir, resource_dir / 'ssl', resource_dir / 'ssl' / 'cacert.pem'))
-
     repaired = 0
-    for path in candidates:
+    for path in _linux_client_cert_candidates(user_home):
         try:
             resolved = path.resolve()
         except OSError:
@@ -973,7 +984,7 @@ def _repair_sober_cert_ownership(uid: int, gid: int) -> None:
         except OSError:
             pass
     if repaired:
-        _log(f'Repaired ownership for {repaired} Sober cert paths')
+        _log(f'Repaired ownership for {repaired} Linux client cert paths')
 
 
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -1021,7 +1032,7 @@ async def _serve(args: argparse.Namespace) -> int:
     stop_file.unlink(missing_ok=True)
 
     _repair_config_ownership(Path(args.config_dir), owner_uid, owner_gid)
-    _repair_sober_cert_ownership(owner_uid, owner_gid)
+    _repair_linux_client_cert_ownership(owner_uid, owner_gid)
     system_ca_details = _ensure_system_ca_for_hosts(hosts, args.ca_cert, install=False)
     if system_ca_details is not None:
         details = system_ca_details

@@ -39,10 +39,20 @@ def _normalise_roblox_dir(value: str | Path) -> Path | None:
 
     if sys.platform.startswith('linux'):
         try:
-            from .platform_linux import SOBER_ASSET_OVERLAY_DIR, SOBER_LEGACY_EXE_DIR
+            from .platform_linux import (
+                MOCKTAIL_ASSET_OVERLAY_DIR,
+                MOCKTAIL_LEGACY_EXE_DIR,
+                SOBER_ASSET_OVERLAY_DIR,
+                SOBER_LEGACY_EXE_DIR,
+            )
 
             resolved = path.resolve()
-            for candidate in (SOBER_ASSET_OVERLAY_DIR, SOBER_LEGACY_EXE_DIR):
+            for candidate in (
+                SOBER_ASSET_OVERLAY_DIR,
+                SOBER_LEGACY_EXE_DIR,
+                MOCKTAIL_ASSET_OVERLAY_DIR,
+                MOCKTAIL_LEGACY_EXE_DIR,
+            ):
                 try:
                     if resolved == candidate.resolve() and path.is_dir():
                         return path

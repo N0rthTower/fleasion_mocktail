@@ -6,7 +6,7 @@ import pytest
 pytest.importorskip('pwd', reason='Linux platform tests require the POSIX pwd module')
 
 from fleasion.utils import platform_linux
-from fleasion.utils.linux_clients import SOBER_CLIENT, LinuxClientInstallation
+from fleasion.utils.linux_clients import MOCKTAIL_CLIENT, SOBER_CLIENT, LinuxClientInstallation
 from fleasion.utils.roblox_dirs import _normalise_roblox_dir
 
 
@@ -576,6 +576,54 @@ def test_sober_env_proxy_override_keeps_sober_as_browser_uri_handler(tmp_path, m
     assert not state_file.exists()
 
 
+def test_native_env_proxy_override_updates_os_environ(tmp_path, monkeypatch):
+    """Native client env proxy must update os.environ so subprocess launches inherit it.
+
+    ``systemctl --user set-environment`` only affects the systemd user manager;
+    it does not change ``os.environ`` of the calling process.  Without updating
+    os.environ, Fleasion-launched clients (e.g. Mocktail) would start without
+    proxy variables and bypass the proxy entirely.
+    """
+    proxy_url = 'http://127.0.0.1:58443'
+    proxy_names = (
+        'HTTP_PROXY',
+        'HTTPS_PROXY',
+        'ALL_PROXY',
+        'http_proxy',
+        'https_proxy',
+        'all_proxy',
+        'NO_PROXY',
+        'no_proxy',
+    )
+
+    # Strip any pre-existing proxy vars so the test is hermetic.
+    for name in proxy_names:
+        monkeypatch.delenv(name, raising=False)
+
+    monkeypatch.setattr(platform_linux.shutil, 'which', lambda _name: None)
+    monkeypatch.setattr(platform_linux, 'LINUX_PROXY_OVERRIDE_STATE', tmp_path / 'proxy-owner.json')
+    monkeypatch.setattr(platform_linux, '_active_linux_proxy_client_key', None)
+    monkeypatch.setattr(
+        platform_linux,
+        '_write_env_proxy_dropin',
+        lambda _key, _env: True,
+    )
+    monkeypatch.setattr(
+        platform_linux.subprocess,
+        'run',
+        lambda command, **_kwargs: platform_linux.subprocess.CompletedProcess(command, 0, '', ''),
+    )
+
+    assert platform_linux.set_mocktail_env_proxy_override(proxy_url)
+    for name in proxy_names:
+        assert name in platform_linux.os.environ, f'{name} missing from os.environ after arm'
+    assert platform_linux.os.environ['HTTPS_PROXY'] == proxy_url
+
+    assert platform_linux.clear_mocktail_env_proxy_override()
+    for name in proxy_names:
+        assert name not in platform_linux.os.environ, f'{name} still present in os.environ after clear'
+
+
 def test_open_folder_uses_detached_standard_user_launch(tmp_path, monkeypatch):
     calls = []
 
@@ -807,3 +855,75 @@ def test_delete_cache_aborts_when_explicit_selection_is_unavailable(tmp_path, mo
         'Cache deletion aborted',
     ]
     assert sentinel.read_bytes() == b'keep'
+
+
+def test_delete_cache_clears_mocktail_cache_dirs_excluding_payloads(tmp_path, monkeypatch):
+    installation = _flatpak_installation(MOCKTAIL_CLIENT, tmp_path)
+    data_root = installation.paths.data_root
+
+    # Populate the various cache directories that should be cleared.
+    def _write(rel: str) -> None:
+        p = data_root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b'cache')
+
+    for rel in (
+        'android/data/rbx-storage/ab/cd1234',
+        'android/data/http/entry',
+        'android/data/http-wob/entry',
+        'android/data/sounds/sound.mp3',
+        'android/data/videos/video.mp4',
+        'android/data/sdcard/Android/data/com.roblox.client/cache/entry',
+        'android/data/files/appData/rbx-storage-sc/entry',
+        'android/data/files/appData/rbx-storage/entry',
+        'android/data/files/appData/tmp-capture-storage/entry',
+        'android/data/files/appData/ota_rbxm_decompressed_cache/entry',
+        'webview/storage/entry',
+        'webview/mediakeys/entry',
+        'android/data/ContentProvider_2149531/entry',
+        'rejections/log.txt',
+    ):
+        _write(rel)
+
+    # payloads/ must be preserved — deleting it forces a Roblox re-download.
+    payloads = data_root / 'payloads'
+    payloads.mkdir(parents=True)
+    p = payloads / 'some-payload' / 'asset.bin'
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b'keep')
+
+    # Non-cache state must be preserved.
+    shared_prefs = data_root / 'android' / 'data' / 'shared_prefs'
+    shared_prefs.mkdir(parents=True)
+    (shared_prefs / 'prefs.xml').write_bytes(b'keep')
+
+    monkeypatch.setattr(
+        platform_linux,
+        'get_selected_linux_client_installation',
+        lambda: installation,
+    )
+    monkeypatch.setattr(platform_linux, 'is_roblox_running', lambda: False)
+
+    messages = platform_linux.delete_cache()
+
+    # All cache dirs should be gone.
+    assert not (data_root / 'android' / 'data' / 'rbx-storage').exists()
+    assert not (data_root / 'android' / 'data' / 'http').exists()
+    assert not (data_root / 'android' / 'data' / 'http-wob').exists()
+    assert not (data_root / 'android' / 'data' / 'sounds').exists()
+    assert not (data_root / 'android' / 'data' / 'videos').exists()
+    assert not (data_root / 'android' / 'data' / 'sdcard' / 'Android' / 'data' / 'com.roblox.client' / 'cache').exists()
+    assert not (data_root / 'android' / 'data' / 'files' / 'appData' / 'rbx-storage-sc').exists()
+    assert not (data_root / 'android' / 'data' / 'files' / 'appData' / 'rbx-storage').exists()
+    assert not (data_root / 'android' / 'data' / 'files' / 'appData' / 'tmp-capture-storage').exists()
+    assert not (data_root / 'android' / 'data' / 'files' / 'appData' / 'ota_rbxm_decompressed_cache').exists()
+    assert not (data_root / 'webview' / 'storage').exists()
+    assert not (data_root / 'webview' / 'mediakeys').exists()
+    assert not (data_root / 'android' / 'data' / 'ContentProvider_2149531').exists()
+    assert not (data_root / 'rejections').exists()
+
+    # payloads/ and shared_prefs/ must survive.
+    assert payloads.exists()
+    assert (payloads / 'some-payload' / 'asset.bin').exists()
+    assert shared_prefs.exists()
+    assert (shared_prefs / 'prefs.xml').exists()

@@ -16,11 +16,12 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from ..localization import tr
 from .linux_clients import (
     LINUX_CLIENTS_BY_KEY,
+    MOCKTAIL_CLIENT,
     SOBER_CLIENT,
     LinuxClientInstallation,
     detect_installed_clients,
@@ -44,12 +45,31 @@ SOBER_CONFIG_FILE = SOBER_FLATPAK_ROOT / 'config' / 'sober' / 'config.json'
 SOBER_ASSET_OVERLAY_DIR = SOBER_DATA_DIR / 'asset_overlay'
 SOBER_LEGACY_EXE_DIR = SOBER_DATA_DIR / 'exe'
 SOBER_CGROUP_MARKER = SOBER_CLIENT.cgroup_marker
+MOCKTAIL_APP_ID = MOCKTAIL_CLIENT.app_id
+_mocktail_paths = MOCKTAIL_CLIENT.paths()
+MOCKTAIL_DATA_DIR = _mocktail_paths.data_root
+MOCKTAIL_CONFIG_FILE = _mocktail_paths.config_file
+MOCKTAIL_ASSET_OVERLAY_DIR = (
+    _mocktail_paths.resource_roots[0]
+    if _mocktail_paths.resource_roots
+    else _mocktail_paths.data_root / 'asset_overlay'
+)
+MOCKTAIL_LEGACY_EXE_DIR = (
+    _mocktail_paths.resource_roots[1]
+    if len(_mocktail_paths.resource_roots) > 1
+    else _mocktail_paths.data_root / 'exe'
+)
+MOCKTAIL_CGROUP_MARKER = MOCKTAIL_CLIENT.cgroup_marker
 LINUX_PROXY_OVERRIDE_STATE = CONFIG_DIR / 'linux_proxy_override.json'
+# systemd user environment drop-ins for arming Env Proxy on native (non-Flatpak)
+# clients.  Flatpak clients are armed via ``flatpak override`` instead.
+LINUX_ENV_PROXY_DROPIN_DIR = USER_HOME / '.config' / 'environment.d'
 # Sober fetches its update/feature manifest before the Roblox engine starts.
 # That bootstrap client uses certificate pinning and does not trust Fleasion's
 # generated CA, so these connections must remain tunneled when the Proxy tab's
 # intercept-all switch is enabled. Roblox traffic is still intercepted normally.
 SOBER_ENV_PROXY_PASSTHROUGH_HOSTS = SOBER_CLIENT.proxy_passthrough_hosts
+MOCKTAIL_ENV_PROXY_PASSTHROUGH_HOSTS = MOCKTAIL_CLIENT.proxy_passthrough_hosts
 PROC_ROOT = Path('/proc')
 _ROBLOX_URI_SCHEMES = ('x-scheme-handler/roblox', 'x-scheme-handler/roblox-player')
 _linux_client_preference: str | None = None
@@ -253,12 +273,15 @@ def _process_pids(name: str) -> list[int]:
     return pids
 
 
-def sober_main_process() -> tuple[int, float] | None:
-    """Return the Sober Roblox engine PID and its boot-time start timestamp.
+def _linux_engine_process(
+    process_name: str, cgroup_marker: str
+) -> tuple[int, float] | None:
+    """Return a client engine PID and its boot-time start timestamp.
 
-    ``Main`` is the Android/Roblox engine process created by Sober.  Pairing
-    the PID with the kernel start timestamp makes a close/reopen detectable
-    even when the process monitor does not observe a moment with no process.
+    The engine process is identified by its process name and Flatpak cgroup
+    marker.  Pairing the PID with the kernel start timestamp makes a
+    close/reopen detectable even when the process monitor does not observe a
+    moment with no process.
     """
     try:
         ticks_per_second = float(os.sysconf('SC_CLK_TCK'))
@@ -267,11 +290,11 @@ def sober_main_process() -> tuple[int, float] | None:
     if ticks_per_second <= 0:
         return None
 
-    for pid in _process_pids('Main'):
+    for pid in _process_pids(process_name):
         process_dir = PROC_ROOT / str(pid)
         try:
             cgroup = (process_dir / 'cgroup').read_text(encoding='utf-8', errors='replace')
-            if SOBER_CGROUP_MARKER not in cgroup:
+            if cgroup_marker not in cgroup:
                 continue
             stat_text = (process_dir / 'stat').read_text(encoding='utf-8', errors='replace')
             # Field 2 (comm) is parenthesized and can contain spaces.  The
@@ -284,13 +307,37 @@ def sober_main_process() -> tuple[int, float] | None:
     return None
 
 
+def sober_main_process() -> tuple[int, float] | None:
+    """Return the Sober Roblox engine PID and its boot-time start timestamp.
+
+    ``Main`` is the Android/Roblox engine process created by Sober.  Pairing
+    the PID with the kernel start timestamp makes a close/reopen detectable
+    even when the process monitor does not observe a moment with no process.
+    """
+    return _linux_engine_process('Main', SOBER_CGROUP_MARKER)
+
+
+def mocktail_main_process() -> tuple[int, float] | None:
+    """Return the Mocktail Roblox engine PID and its boot-time start timestamp.
+
+    The Mocktail launcher process carries the Flatpak cgroup marker.  Pairing
+    the PID with the kernel start timestamp makes a close/reopen detectable
+    even when the process monitor does not observe a moment with no process.
+    """
+    return _linux_engine_process('mocktail', MOCKTAIL_CGROUP_MARKER)
+
+
 def linux_client_main_process(
     installation: LinuxClientInstallation | None = None,
 ) -> tuple[int, float] | None:
     installation = installation or get_selected_linux_client_installation()
-    if installation is None or installation.key != SOBER_CLIENT.key:
+    if installation is None:
         return None
-    return sober_main_process()
+    if installation.key == SOBER_CLIENT.key:
+        return sober_main_process()
+    if installation.key == MOCKTAIL_CLIENT.key:
+        return mocktail_main_process()
+    return None
 
 
 def _client_pids(installation: LinuxClientInstallation) -> list[int]:
@@ -475,7 +522,7 @@ def delete_cache() -> list[str]:
     storage_folder: Path | None = None
     if storage_db is not None:
         _delete_path(storage_db, messages, 'Storage database')
-        for suffix in ('-wal', '-shm'):
+        for suffix in ('-wal', '-shm', '-journal'):
             sidecar = Path(str(storage_db) + suffix)
             if sidecar.exists():
                 _delete_path(sidecar, messages, f'Storage database {suffix}')
@@ -502,6 +549,73 @@ def delete_cache() -> list[str]:
         except OSError as exc:
             messages.append(f'Failed to delete obj cache: {exc}')
 
+    # Clear the client's XDG cache root subdirectories.  Native clients like
+    # Mocktail store cache here (android, clientsettings, downloads, graphics,
+    # webview…) rather than under rbx-storage.
+    cache_root = installation.paths.cache_root
+    if cache_root.exists():
+        try:
+            for child in cache_root.iterdir():
+                if child.name == 'rbx-storage':
+                    continue  # already handled above
+                if child.is_dir():
+                    shutil.rmtree(child)
+                    messages.append(f'Cache ({child.name}) deleted successfully')
+                else:
+                    child.unlink()
+                    messages.append(f'Cache file ({child.name}) deleted successfully')
+        except PermissionError:
+            messages.append('Failed to delete client cache: permission denied')
+        except OSError as exc:
+            messages.append(f'Failed to delete client cache: {exc}')
+
+    # Clear cache-relevant directories from the client's XDG data root.
+    # These hold rejection logs, HTTP caches, per-app caches, and
+    # content-addressable storage that hold decals, sounds, animations, and
+    # models.  payloads/ is intentionally excluded — deleting it forces
+    # Mocktail to re-download the entire Roblox payload.
+    data_root = installation.paths.data_root
+    cache_relative = (
+        Path('rejections'),
+        Path('android') / 'data' / 'cache',
+        Path('android') / 'data' / 'http',
+        Path('android') / 'data' / 'http-wob',
+        Path('android') / 'data' / 'rbx-storage',
+        Path('android') / 'data' / 'sounds',
+        Path('android') / 'data' / 'videos',
+        Path('android') / 'data' / 'sdcard' / 'Android' / 'data' / 'com.roblox.client' / 'cache',
+        Path('android') / 'data' / 'files' / 'appData' / 'rbx-storage-sc',
+        Path('android') / 'data' / 'files' / 'appData' / 'rbx-storage',
+        Path('android') / 'data' / 'files' / 'appData' / 'tmp-capture-storage',
+        Path('android') / 'data' / 'files' / 'appData' / 'ota_rbxm_decompressed_cache',
+        Path('webview') / 'storage',
+        Path('webview') / 'mediakeys',
+    )
+    if data_root.exists():
+        try:
+            for relative in cache_relative:
+                target = data_root / relative
+                if target.exists():
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+                    messages.append(f'Cache ({relative}) deleted successfully')
+            # Mocktail creates per-provider ContentProvider_* directories under
+            # android/data/.  These hold cached asset data and have variable
+            # names, so they are matched with a glob rather than listed by name.
+            for cp_dir in sorted(data_root.glob('android/data/ContentProvider_*')):
+                if cp_dir.is_dir():
+                    shutil.rmtree(cp_dir)
+                    messages.append(f'Cache ({cp_dir.name}) deleted successfully')
+                else:
+                    cp_dir.unlink()
+                    messages.append(f'Cache file ({cp_dir.name}) deleted successfully')
+        except PermissionError:
+            messages.append('Failed to delete client data cache: permission denied')
+        except OSError as exc:
+            messages.append(f'Failed to delete client data cache: {exc}')
+
     return messages
 
 
@@ -524,9 +638,8 @@ def find_roblox_resource_dirs(include_studio: bool = True) -> list[Path]:
         return found
 
     resource_roots = installation.paths.resource_roots
-    if installation.paths.data_root.exists() and resource_roots:
-        resource_roots[0].mkdir(parents=True, exist_ok=True)
     for resource_root in resource_roots:
+        resource_root.mkdir(parents=True, exist_ok=True)
         _add(resource_root)
     return found
 
@@ -538,6 +651,18 @@ def is_sober_resource_dir(path: Path) -> bool:
         return resolved in {
             SOBER_ASSET_OVERLAY_DIR.resolve(),
             SOBER_LEGACY_EXE_DIR.resolve(),
+        }
+    except OSError:
+        return False
+
+
+def is_mocktail_resource_dir(path: Path) -> bool:
+    """Return True when *path* is one of Mocktail's resource roots."""
+    try:
+        resolved = path.resolve()
+        return resolved in {
+            MOCKTAIL_ASSET_OVERLAY_DIR.resolve(),
+            MOCKTAIL_LEGACY_EXE_DIR.resolve(),
         }
     except OSError:
         return False
@@ -851,37 +976,47 @@ def set_linux_client_env_proxy_override(
         proxy_url,
     )
 
-    flatpak = shutil.which('flatpak')
-    if not flatpak:
-        log_buffer.log(
-            'Launcher',
-            f'Cannot arm {installation.display_name} Env Proxy: flatpak command not found',
-        )
-        return False
-    try:
-        result = _standard_user_run(
-            [
-                flatpak,
-                'override',
-                '--user',
-                *(f'--env={key}={value}' for key, value in proxy_env.items()),
-                installation.app_id,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except Exception as exc:
-        log_buffer.log('Launcher', f'Could not arm {installation.display_name} Env Proxy: {exc}')
-        return False
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        log_buffer.log(
-            'Launcher',
-            f'Could not arm {installation.display_name} Env Proxy'
-            + (f': {detail}' if detail else ''),
-        )
-        return False
+    if installation.client.is_flatpak:
+        flatpak = shutil.which('flatpak')
+        if not flatpak:
+            log_buffer.log(
+                'Launcher',
+                f'Cannot arm {installation.display_name} Env Proxy: flatpak command not found',
+            )
+            return False
+        try:
+            result = _standard_user_run(
+                [
+                    flatpak,
+                    'override',
+                    '--user',
+                    *(f'--env={key}={value}' for key, value in proxy_env.items()),
+                    installation.app_id,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as exc:
+            log_buffer.log('Launcher', f'Could not arm {installation.display_name} Env Proxy: {exc}')
+            return False
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            log_buffer.log(
+                'Launcher',
+                f'Could not arm {installation.display_name} Env Proxy'
+                + (f': {detail}' if detail else ''),
+            )
+            return False
+    else:
+        # Native (non-Flatpak) clients cannot be armed via flatpak override.
+        # Write the proxy environment to a systemd user environment drop-in so
+        # new sessions pick it up, and try systemctl --user for the current
+        # session.  The client may need to be restarted for the override to
+        # take effect.
+        if not _arm_native_linux_client_env_proxy(installation, proxy_env):
+            return False
+
     _active_linux_proxy_client_key = installation.key
     _write_linux_proxy_override_state(installation.key)
     log_buffer.log(
@@ -900,42 +1035,145 @@ def clear_linux_client_env_proxy_override(*, client_key: str | None = None) -> b
     if installation is None:
         return False
     names = installation.client.proxy_environment_names
-    flatpak = shutil.which('flatpak')
-    if not flatpak:
-        log_buffer.log(
-            'Launcher',
-            f'Cannot disarm {installation.display_name} Env Proxy: flatpak command not found',
-        )
-        return False
-    try:
-        result = _standard_user_run(
-            [
-                flatpak,
-                'override',
-                '--user',
-                *(f'--unset-env={name}' for name in names),
-                installation.app_id,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except Exception as exc:
-        log_buffer.log('Launcher', f'Could not disarm {installation.display_name} Env Proxy: {exc}')
-        return False
-    if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
-        log_buffer.log(
-            'Launcher',
-            f'Could not disarm {installation.display_name} Env Proxy'
-            + (f': {detail}' if detail else ''),
-        )
-        return False
+
+    if installation.client.is_flatpak:
+        flatpak = shutil.which('flatpak')
+        if not flatpak:
+            log_buffer.log(
+                'Launcher',
+                f'Cannot disarm {installation.display_name} Env Proxy: flatpak command not found',
+            )
+            return False
+        try:
+            result = _standard_user_run(
+                [
+                    flatpak,
+                    'override',
+                    '--user',
+                    *(f'--unset-env={name}' for name in names),
+                    installation.app_id,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as exc:
+            log_buffer.log('Launcher', f'Could not disarm {installation.display_name} Env Proxy: {exc}')
+            return False
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            log_buffer.log(
+                'Launcher',
+                f'Could not disarm {installation.display_name} Env Proxy'
+                + (f': {detail}' if detail else ''),
+            )
+            return False
+    else:
+        if not _clear_native_linux_client_env_proxy(installation, names):
+            return False
     if _active_linux_proxy_client_key == key:
         _active_linux_proxy_client_key = None
     if _read_linux_proxy_override_state() == key:
         _write_linux_proxy_override_state(None)
     log_buffer.log('Launcher', f'Disarmed {installation.display_name} Env Proxy')
+    return True
+
+
+def _env_proxy_dropin_path(client_key: str) -> Path:
+    """Return the systemd user environment drop-in path for a native client."""
+    return LINUX_ENV_PROXY_DROPIN_DIR / f'fleasion-proxy-{client_key}.conf'
+
+
+def _write_env_proxy_dropin(client_key: str, proxy_env: dict[str, str]) -> bool:
+    """Write proxy env vars to a systemd user environment drop-in file."""
+    try:
+        LINUX_ENV_PROXY_DROPIN_DIR.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = []
+        for name, value in proxy_env.items():
+            lines.append(f'{name}={value}')
+        content = '\n'.join(lines) + '\n'
+        dropin = _env_proxy_dropin_path(client_key)
+        dropin.write_text(content, encoding='utf-8')
+        dropin.chmod(0o600)
+        return True
+    except OSError as exc:
+        log_buffer.log(
+            'Launcher',
+            f'Could not write Env Proxy environment drop-in for {client_key}: {exc}',
+        )
+        return False
+
+
+def _remove_env_proxy_dropin(client_key: str) -> None:
+    """Remove the systemd user environment drop-in file for a native client."""
+    try:
+        _env_proxy_dropin_path(client_key).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _systemctl_user_env(args: list[str]) -> bool:
+    """Run a systemctl --user environment command, best-effort."""
+    systemctl = shutil.which('systemctl')
+    if systemctl is None:
+        return False
+    try:
+        result = _standard_user_run(
+            [systemctl, '--user', *args],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def _arm_native_linux_client_env_proxy(
+    installation: LinuxClientInstallation, proxy_env: dict[str, str]
+) -> bool:
+    """Arm Env Proxy for a native (non-Flatpak) client via systemd environment drop-in."""
+    if not _write_env_proxy_dropin(installation.key, proxy_env):
+        return False
+    # Best-effort: set the environment in the current systemd user session so
+    # already-running clients may pick it up without a restart.
+    set_args: list[str] = []
+    for name, value in proxy_env.items():
+        set_args.extend(['set-environment', f'{name}={value}'])
+    if set_args:
+        _systemctl_user_env(set_args)
+    # Also update this process's environment so that any subprocess Fleasion
+    # launches afterwards (including the Linux client itself) inherits the
+    # proxy variables.  ``systemctl --user set-environment`` only affects the
+    # systemd user manager; it does not change ``os.environ`` of the caller.
+    for name, value in proxy_env.items():
+        os.environ[name] = value
+    log_buffer.log(
+        'Launcher',
+        f'Armed {installation.display_name} Env Proxy via systemd environment drop-in '
+        '(client restart may be required)',
+    )
+    return True
+
+
+def _clear_native_linux_client_env_proxy(
+    installation: LinuxClientInstallation, names: Iterable[str]
+) -> bool:
+    """Clear Env Proxy for a native (non-Flatpak) client."""
+    _remove_env_proxy_dropin(installation.key)
+    # Best-effort: unset the environment in the current systemd user session.
+    unset_args: list[str] = []
+    for name in names:
+        unset_args.extend(['unsetenv', name])
+    if unset_args:
+        _systemctl_user_env(unset_args)
+    # Remove from this process's environment so subsequent subprocess launches
+    # do not inherit stale proxy variables after the override is cleared.
+    for name in names:
+        os.environ.pop(name, None)
+    log_buffer.log(
+        'Launcher', f'Disarmed {installation.display_name} Env Proxy'
+    )
     return True
 
 
@@ -961,6 +1199,16 @@ def set_sober_env_proxy_override(proxy_url: str) -> bool:
 def clear_sober_env_proxy_override() -> bool:
     """Backward-compatible explicit Sober override cleanup helper."""
     return clear_linux_client_env_proxy_override(client_key='sober')
+
+
+def set_mocktail_env_proxy_override(proxy_url: str) -> bool:
+    """Backward-compatible explicit Mocktail override helper."""
+    return set_linux_client_env_proxy_override(proxy_url, client_key='mocktail')
+
+
+def clear_mocktail_env_proxy_override() -> bool:
+    """Backward-compatible explicit Mocktail override cleanup helper."""
+    return clear_linux_client_env_proxy_override(client_key='mocktail')
 
 
 def _set_default_roblox_uri_handler(desktop_id: str) -> bool:

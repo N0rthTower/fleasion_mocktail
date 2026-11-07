@@ -7,6 +7,7 @@ import pytest
 from fleasion.utils.linux_clients import (
     LINUX_CLIENTS,
     LINUX_CLIENTS_BY_KEY,
+    MOCKTAIL_CLIENT,
     SOBER_CLIENT,
     LinuxClientInstallation,
     detect_installed_clients,
@@ -25,12 +26,26 @@ def _installation(client, tmp_path: Path) -> LinuxClientInstallation:
     )
 
 
-def test_registry_contains_only_sober():
-    assert LINUX_CLIENTS == (SOBER_CLIENT,)
-    assert dict(LINUX_CLIENTS_BY_KEY) == {'sober': SOBER_CLIENT}
+def _native_installation(client, tmp_path: Path) -> LinuxClientInstallation:
+    return LinuxClientInstallation(
+        client=client,
+        paths=client.paths(home=tmp_path, environ={}),
+        executable=Path(f'/usr/bin/{client.key}'),
+    )
+
+
+def test_registry_contains_sober_and_mocktail():
+    assert LINUX_CLIENTS == (SOBER_CLIENT, MOCKTAIL_CLIENT)
+    assert dict(LINUX_CLIENTS_BY_KEY) == {
+        'sober': SOBER_CLIENT,
+        'mocktail': MOCKTAIL_CLIENT,
+    }
     assert get_linux_client('SOBER') is SOBER_CLIENT
+    assert get_linux_client('mocktail') is MOCKTAIL_CLIENT
     assert SOBER_CLIENT.app_id == 'org.vinegarhq.Sober'
     assert SOBER_CLIENT.desktop_id == 'org.vinegarhq.Sober.desktop'
+    assert MOCKTAIL_CLIENT.app_id == 'space.bigrat.mocktail'
+    assert MOCKTAIL_CLIENT.desktop_id == 'space.bigrat.mocktail.desktop'
 
 
 def test_sober_flatpak_paths_match_existing_layout(tmp_path):
@@ -50,6 +65,29 @@ def test_sober_flatpak_paths_match_existing_layout(tmp_path):
     assert paths.cache_storage_dir == root / 'cache' / 'sober' / 'rbx-storage'
 
 
+def test_mocktail_xdg_paths_match_native_layout(tmp_path):
+    paths = MOCKTAIL_CLIENT.paths(home=tmp_path, environ={})
+    data_root = tmp_path / '.local' / 'share' / 'mocktail'
+    config_root = tmp_path / '.config' / 'mocktail'
+    cache_root = tmp_path / '.cache' / 'mocktail'
+
+    assert not MOCKTAIL_CLIENT.is_flatpak
+    assert MOCKTAIL_CLIENT.executable_name == 'mocktail'
+    assert paths.flatpak_root == data_root
+    assert paths.config_root == config_root
+    assert paths.data_root == data_root
+    assert paths.cache_root == cache_root
+    assert paths.config_file == config_root / 'config.yaml'
+    assert paths.resource_roots == (
+        data_root / 'asset_overlay',
+        data_root / 'exe',
+    )
+    assert paths.storage_db == (
+        data_root / 'android' / 'data' / 'files' / 'appData' / 'rbx-storage.db'
+    )
+    assert paths.cache_storage_dir is None
+
+
 def test_paths_use_explicit_environment_home(tmp_path):
     home = tmp_path / 'desktop-user'
     paths = SOBER_CLIENT.paths(environ={'HOME': str(home)})
@@ -58,7 +96,40 @@ def test_paths_use_explicit_environment_home(tmp_path):
     assert paths.flatpak_root == home / '.var' / 'app' / SOBER_CLIENT.app_id
 
 
-def test_detect_installed_clients_uses_flatpak_info(tmp_path):
+def test_detect_installed_clients_detects_flatpak_sober_and_native_mocktail(tmp_path):
+    commands = []
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, '', '')
+
+    installed = detect_installed_clients(
+        home=tmp_path,
+        environ={},
+        which=lambda name: {
+            'flatpak': '/usr/bin/flatpak',
+            'mocktail': '/usr/bin/mocktail',
+        }.get(name),
+        run=run,
+    )
+
+    assert [item.key for item in installed] == ['sober', 'mocktail']
+    assert commands == [
+        ['/usr/bin/flatpak', 'info', 'org.vinegarhq.Sober'],
+    ]
+    assert installed[0].launch_command('roblox://experiences/start?placeId=1818') == [
+        '/usr/bin/flatpak',
+        'run',
+        'org.vinegarhq.Sober',
+        'roblox://experiences/start?placeId=1818',
+    ]
+    assert installed[1].launch_command('roblox://experiences/start?placeId=1818') == [
+        '/usr/bin/mocktail',
+        'roblox://experiences/start?placeId=1818',
+    ]
+
+
+def test_detect_installed_clients_only_sober_when_mocktail_not_on_path(tmp_path):
     commands = []
 
     def run(command, **_kwargs):
@@ -73,13 +144,24 @@ def test_detect_installed_clients_uses_flatpak_info(tmp_path):
     )
 
     assert [item.key for item in installed] == ['sober']
-    assert commands == [['/usr/bin/flatpak', 'info', 'org.vinegarhq.Sober']]
-    assert installed[0].launch_command('roblox://experiences/start?placeId=1818') == [
-        '/usr/bin/flatpak',
-        'run',
-        'org.vinegarhq.Sober',
-        'roblox://experiences/start?placeId=1818',
+    assert commands == [
+        ['/usr/bin/flatpak', 'info', 'org.vinegarhq.Sober'],
     ]
+
+
+def test_detect_installed_clients_only_mocktail_without_flatpak(tmp_path):
+    def run(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 0, '', '')
+
+    installed = detect_installed_clients(
+        home=tmp_path,
+        environ={},
+        which=lambda name: '/usr/bin/mocktail' if name == 'mocktail' else None,
+        run=run,
+    )
+
+    assert [item.key for item in installed] == ['mocktail']
+    assert installed[0].launch_command() == ['/usr/bin/mocktail']
 
 
 def test_detect_installed_clients_strips_pyinstaller_library_path(tmp_path, monkeypatch):
@@ -97,11 +179,14 @@ def test_detect_installed_clients_strips_pyinstaller_library_path(tmp_path, monk
     installed = detect_installed_clients(
         home=tmp_path,
         environ={'LD_LIBRARY_PATH': f'{bundle_root}:{host_libs}'},
-        which=lambda name: '/usr/bin/flatpak' if name == 'flatpak' else None,
+        which=lambda name: {
+            'flatpak': '/usr/bin/flatpak',
+            'mocktail': '/usr/bin/mocktail',
+        }.get(name),
         run=run,
     )
 
-    assert [item.key for item in installed] == ['sober']
+    assert [item.key for item in installed] == ['sober', 'mocktail']
     assert calls[0][1]['HOME'] == str(tmp_path)
     assert calls[0][1]['LD_LIBRARY_PATH'] == str(host_libs)
 
@@ -228,12 +313,24 @@ def test_explicit_selection_never_falls_back(tmp_path):
 
     assert select_linux_client('sober', installed=(sober,)) is sober
     assert select_linux_client('sober', installed=()) is None
-    with pytest.raises(ValueError, match='auto, sober'):
+    with pytest.raises(ValueError, match='auto, sober, mocktail'):
         select_linux_client('unknown', installed=(sober,))
 
 
 def test_resource_owner_uses_exact_registered_roots(tmp_path):
     installation = _installation(SOBER_CLIENT, tmp_path)
+    overlay, legacy = installation.paths.resource_roots
+
+    assert identify_resource_owner(overlay / 'content' / 'sounds', (installation,)) is installation
+    assert identify_resource_owner(legacy / 'PlatformContent', (installation,)) is installation
+    assert identify_resource_owner(overlay.parent / 'asset_overlay-old', (installation,)) is None
+    assert (
+        identify_resource_owner(tmp_path / 'unrelated' / 'asset_overlay', (installation,)) is None
+    )
+
+
+def test_mocktail_resource_owner_uses_exact_registered_roots(tmp_path):
+    installation = _native_installation(MOCKTAIL_CLIENT, tmp_path)
     overlay, legacy = installation.paths.resource_roots
 
     assert identify_resource_owner(overlay / 'content' / 'sounds', (installation,)) is installation

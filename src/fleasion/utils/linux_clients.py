@@ -1,9 +1,9 @@
 """Registry and discovery for supported Linux Roblox clients.
 
-Sober is currently the only registered backend. Keeping its identity, paths,
-process markers, desktop handlers, and proxy capabilities in a descriptor
-provides a small extension seam without spreading client checks throughout the
-Linux platform helpers.
+Sober and Mocktail are the registered backends.  Keeping each client's
+identity, paths, process markers, desktop handlers, and proxy capabilities in
+a descriptor provides a small extension seam without spreading client checks
+throughout the Linux platform helpers.
 """
 
 from __future__ import annotations
@@ -47,7 +47,14 @@ def _home_path(home: str | Path | None, environ: Mapping[str, str]) -> Path:
 
 @dataclass(frozen=True, slots=True)
 class LinuxClientDescriptor:
-    """Static Flatpak identity and capabilities for one Linux client."""
+    """Identity and capabilities for one Linux client.
+
+    Clients may be installed as a Flatpak (``is_flatpak=True``) or as a native
+    package such as an AUR build (``is_flatpak=False``).  Flatpak clients live
+    under ``~/.var/app/<app_id>/`` and are managed through the ``flatpak``
+    command; native clients use XDG directories under ``~/.config/`` and
+    ``~/.local/share/`` and are launched directly.
+    """
 
     key: str
     display_name: str
@@ -64,6 +71,9 @@ class LinuxClientDescriptor:
     proxy_environment_names: tuple[str, ...] = ()
     proxy_passthrough_hosts: frozenset[str] = frozenset()
     clientsettings_route_delay_seconds: float = 0.0
+    is_flatpak: bool = True
+    executable_name: str | None = None
+    desktop_file_name: str | None = None
 
     @property
     def desktop_id(self) -> str:
@@ -75,13 +85,37 @@ class LinuxClientDescriptor:
         home: str | Path | None = None,
         environ: Mapping[str, str] | None = None,
     ) -> LinuxClientPaths:
-        """Resolve the host-visible Flatpak paths for this descriptor."""
+        """Resolve the host-visible paths for this descriptor.
+
+        Flatpak clients use ``~/.var/app/<app_id>/``.  Native clients use XDG
+        directories: config under ``$XDG_CONFIG_HOME/<namespace>`` (default
+        ``~/.config/<namespace>``), data under ``$XDG_DATA_HOME/<namespace>``
+        (default ``~/.local/share/<namespace>``), and cache under
+        ``$XDG_CACHE_HOME/<namespace>`` (default ``~/.cache/<namespace>``).
+        """
         environment = os.environ if environ is None else environ
         resolved_home = _home_path(home, environment)
-        flatpak_root = resolved_home / '.var' / 'app' / self.app_id
-        config_root = flatpak_root / 'config' / self.xdg_namespace
-        data_root = flatpak_root / 'data' / self.xdg_namespace
-        cache_root = flatpak_root / 'cache' / self.xdg_namespace
+
+        if self.is_flatpak:
+            flatpak_root = resolved_home / '.var' / 'app' / self.app_id
+            config_root = flatpak_root / 'config' / self.xdg_namespace
+            data_root = flatpak_root / 'data' / self.xdg_namespace
+            cache_root = flatpak_root / 'cache' / self.xdg_namespace
+        else:
+            xdg_config = environment.get('XDG_CONFIG_HOME') or str(
+                resolved_home / '.config'
+            )
+            xdg_data = environment.get('XDG_DATA_HOME') or str(
+                resolved_home / '.local' / 'share'
+            )
+            xdg_cache = environment.get('XDG_CACHE_HOME') or str(
+                resolved_home / '.cache'
+            )
+            flatpak_root = Path(xdg_data) / self.xdg_namespace
+            config_root = Path(xdg_config) / self.xdg_namespace
+            data_root = Path(xdg_data) / self.xdg_namespace
+            cache_root = Path(xdg_cache) / self.xdg_namespace
+
         return LinuxClientPaths(
             client=self,
             home=resolved_home,
@@ -106,7 +140,7 @@ class LinuxClientDescriptor:
 
 @dataclass(frozen=True, slots=True)
 class LinuxClientPaths:
-    """Host-visible paths for one concrete Flatpak client installation."""
+    """Host-visible paths for one concrete client installation."""
 
     client: LinuxClientDescriptor
     home: Path
@@ -153,7 +187,10 @@ class LinuxClientInstallation:
     def launch_command(self, uri: str | None = None) -> list[str] | None:
         if self.executable is None:
             return None
-        command = [str(self.executable), 'run', self.app_id]
+        if self.client.is_flatpak:
+            command = [str(self.executable), 'run', self.app_id]
+        else:
+            command = [str(self.executable)]
         if uri:
             command.append(uri)
         return command
@@ -192,9 +229,37 @@ SOBER_CLIENT = LinuxClientDescriptor(
     clientsettings_route_delay_seconds=30.0,
 )
 
-# A future backend belongs here only after its descriptor and any truly
-# client-specific adapters have been implemented and tested.
-LINUX_CLIENTS = (SOBER_CLIENT,)
+MOCKTAIL_CLIENT = LinuxClientDescriptor(
+    key='mocktail',
+    display_name='Mocktail',
+    app_id='space.bigrat.mocktail',
+    desktop_ids=('space.bigrat.mocktail.desktop',),
+    xdg_namespace='mocktail',
+    process_names=('mocktail', 'Mocktail', 'space.bigrat.mocktail'),
+    engine_process_names=('mocktail',),
+    cgroup_marker='',
+    config_filename='config.yaml',
+    resource_relative_paths=(Path('asset_overlay'), Path('exe')),
+    storage_db_relative_path=Path('android/data/files/appData/rbx-storage.db'),
+    cache_storage_relative_path=None,
+    proxy_environment_names=(
+        'ALL_PROXY',
+        'HTTPS_PROXY',
+        'HTTP_PROXY',
+        'all_proxy',
+        'https_proxy',
+        'http_proxy',
+        'NO_PROXY',
+        'no_proxy',
+    ),
+    proxy_passthrough_hosts=frozenset({'mocktail.space.bigrat', 'raw.githubusercontent.com'}),
+    clientsettings_route_delay_seconds=0.0,
+    is_flatpak=False,
+    executable_name='mocktail',
+    desktop_file_name='space.bigrat.mocktail.desktop',
+)
+
+LINUX_CLIENTS = (SOBER_CLIENT, MOCKTAIL_CLIENT)
 LINUX_CLIENTS_BY_KEY: Mapping[str, LinuxClientDescriptor] = MappingProxyType(
     {client.key: client for client in LINUX_CLIENTS}
 )
@@ -267,6 +332,23 @@ def _flatpak_info_succeeds(
     return result.returncode == 0
 
 
+def _detect_non_flatpak_client(
+    client: LinuxClientDescriptor,
+    find_executable: Callable[[str], str | None],
+) -> LinuxClientInstallation | None:
+    """Detect a native (non-Flatpak) client by executable on PATH."""
+    if client.is_flatpak or not client.executable_name:
+        return None
+    executable_path = find_executable(client.executable_name)
+    if executable_path is None:
+        return None
+    return LinuxClientInstallation(
+        client=client,
+        paths=client.paths(),
+        executable=Path(executable_path),
+    )
+
+
 def detect_installed_clients(
     *,
     home: str | Path | None = None,
@@ -274,26 +356,31 @@ def detect_installed_clients(
     which: Callable[[str], str | None] | None = None,
     run: Callable[..., subprocess.CompletedProcess] | None = None,
 ) -> tuple[LinuxClientInstallation, ...]:
-    """Detect registered Flatpak clients in deterministic registry order."""
+    """Detect registered Linux clients (Flatpak and native) in registry order."""
     environment = os.environ if environ is None else environ
     find_executable = shutil.which if which is None else which
     flatpak = find_executable('flatpak')
     detected: list[LinuxClientInstallation] = []
     for client in LINUX_CLIENTS:
         paths = client.paths(home=home, environ=environment)
-        # Flatpak keeps ~/.var/app/<id> data after an uninstall unless the user
-        # explicitly removes application data.  Treat only `flatpak info` as
-        # authoritative installation evidence so stale data is never modified.
-        probe_env = _flatpak_probe_env(environment, home=paths.home)
-        if not _flatpak_info_succeeds(flatpak, client.app_id, run, env=probe_env):
-            continue
-        detected.append(
-            LinuxClientInstallation(
-                client=client,
-                paths=paths,
-                executable=Path(flatpak) if flatpak else None,
+        if client.is_flatpak:
+            # Flatpak keeps ~/.var/app/<id> data after an uninstall unless the user
+            # explicitly removes application data.  Treat only `flatpak info` as
+            # authoritative installation evidence so stale data is never modified.
+            probe_env = _flatpak_probe_env(environment, home=paths.home)
+            if not _flatpak_info_succeeds(flatpak, client.app_id, run, env=probe_env):
+                continue
+            detected.append(
+                LinuxClientInstallation(
+                    client=client,
+                    paths=paths,
+                    executable=Path(flatpak) if flatpak else None,
+                )
             )
-        )
+        else:
+            native = _detect_non_flatpak_client(client, find_executable)
+            if native is not None:
+                detected.append(native)
     return tuple(detected)
 
 

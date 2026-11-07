@@ -1,7 +1,7 @@
 # Fleasion mocktail port
 
 > [!IMPORTANT]
-> Roblox has patched official Fleasion and it currently does not work. There is **no ETA** for a fix.
+> Roblox has patched [official Fleasion](https://github.com/fleasion/Fleasion) and it currently does not work. There is **no ETA** for a fix.
 
 Fleasion replaces Roblox game assets in real time. It runs a local HTTPS proxy between Roblox and its servers so textures, audio, meshes, animations, and other assets can be swapped before reaching the client.
 

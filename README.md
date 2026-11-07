@@ -6,7 +6,6 @@
 Fleasion replaces Roblox game assets in real time. It runs a local HTTPS proxy between Roblox and its servers so textures, audio, meshes, animations, and other assets can be swapped before reaching the client.
 
 **Platforms:** Windows, macOS, Linux (Sober Flatpak and Mocktail native).
-> [!INFO]
 > If using mocktail you need to edit ~/.config/mocktail/config.yaml and under ``integrations`` change ``fleasion`` to true. If you miss this step, you will get a http error when joining a game
 
 ## Installation

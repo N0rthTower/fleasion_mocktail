@@ -4528,6 +4528,27 @@ def main():
     atexit.register(mod_manager.clear_managed_file_read_only)
     atexit.register(mod_manager.restore_all)
 
+    # 3. Signal-driven shutdown (e.g. window manager closing the app with
+    #    SIGTERM). atexit hooks are skipped when a process is killed by a
+    #    signal, so without this the proxy's hosts-file / env-proxy cleanup
+    #    never runs and the system-wide proxy environment is stranded.
+    app.aboutToQuit.connect(proxy_master.stop)
+
+    def _handle_shutdown_signal(signum: int, frame) -> None:
+        log_buffer.log(
+            'App', f'Received signal {signum}; shutting down Fleasion gracefully'
+        )
+        QApplication.quit()
+
+    try:
+        signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+    except (OSError, ValueError) as exc:
+        log_buffer.log('App', f'Could not install SIGTERM handler: {exc}')
+    try:
+        signal.signal(signal.SIGINT, _handle_shutdown_signal)
+    except (OSError, ValueError) as exc:
+        log_buffer.log('App', f'Could not install SIGINT handler: {exc}')
+
     # Start PreJsons download in background
     run_in_thread(download_prejsons)()
 
